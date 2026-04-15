@@ -238,7 +238,7 @@ async def identify_product(photo: UploadFile = File(...)):
 
     with db_context() as conn:
         products = conn.execute(
-            "SELECT id, name, specs, weight, category FROM products ORDER BY name"
+            "SELECT id, name, specs, weight, category, visual_description FROM products ORDER BY name"
         ).fetchall()
 
     if not products:
@@ -247,20 +247,33 @@ async def identify_product(photo: UploadFile = File(...)):
             "message": "No products in catalog yet. Ask an admin to add products first.",
         })
 
+    # Step 1: Describe what's in the uploaded photo
+    describe_prompt = """Look carefully at this product photo.
+Describe in detail: what type of product it is, its material (metal, plastic, rubber…),
+shape, color/finish, any visible text or markings, and what it is typically used for.
+Be specific — 3 to 5 sentences."""
+
+    # Step 2: Build catalog with visual descriptions for better matching
     catalog_lines = []
     for p in products:
         line = f"- ID {p['id']}: {p['name']}"
-        if p["category"]: line += f" | Category: {p['category']}"
-        if p["specs"]:    line += f" | Specs: {p['specs']}"
-        if p["weight"]:   line += f" | Weight: {p['weight']}"
+        if p["category"]:            line += f" | Category: {p['category']}"
+        if p["weight"]:              line += f" | Weight: {p['weight']}"
+        if p["specs"]:               line += f" | Specs: {p['specs'][:80]}"
+        if p["visual_description"]:  line += f" | Looks like: {p['visual_description'][:120]}"
         catalog_lines.append(line)
 
-    prompt = f"""You are a product identification assistant for a warehouse/shop.
+    match_prompt = f"""You are a product identification assistant for a warehouse/shop.
+
+A worker uploaded a photo of a product. Here is a detailed description of what is in the photo:
+{{DESCRIPTION}}
+
+Now compare that description to our product catalog below and find the best match.
+Focus on material, shape, category, and appearance — not just the name.
 
 Product catalog:
 {chr(10).join(catalog_lines)}
 
-Look carefully at the image and match it to the best product in the catalog above.
 Return ONLY a JSON object — no markdown, no explanation.
 
 If matched:
@@ -268,19 +281,27 @@ If matched:
   "matched": true,
   "product_id": <integer ID from catalog>,
   "confidence": "high" | "medium" | "low",
-  "reason": "<brief explanation>"
+  "reason": "<what matched>"
 }}
 
 If NOT in catalog:
 {{
   "matched": false,
-  "description": "<what you see in the image>",
-  "reason": "<why it doesn't match any catalog item>"
+  "description": "<what the product is>",
+  "reason": "<why nothing in the catalog matches>"
 }}"""
 
     try:
         client = get_client()
-        raw    = call_vision(client, content, prompt)
+        # Step 1: get visual description of uploaded photo
+        description = call_vision(client, content, describe_prompt)
+        # Step 2: match description against catalog
+        final_prompt = match_prompt.replace("{DESCRIPTION}", description)
+        raw = client.chat.completions.create(
+            model=GROQ_MODEL,
+            max_tokens=256,
+            messages=[{"role": "user", "content": final_prompt}],
+        ).choices[0].message.content.strip()
     except HTTPException:
         raise
     except Exception as e:

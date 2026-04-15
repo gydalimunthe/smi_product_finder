@@ -32,13 +32,14 @@ def init_db():
     with db_context() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS products (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT NOT NULL,
-                specs       TEXT,
-                weight      TEXT,
-                category    TEXT,
-                notes       TEXT,
-                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                name                TEXT NOT NULL,
+                specs               TEXT,
+                weight              TEXT,
+                category            TEXT,
+                notes               TEXT,
+                visual_description  TEXT DEFAULT "",
+                created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS product_images (
@@ -57,9 +58,10 @@ def init_db():
             data = json.loads(SEED_FILE.read_text())
             for p in data.get("products", []):
                 conn.execute(
-                    "INSERT INTO products (id, name, specs, weight, category, notes, created_at) VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO products (id, name, specs, weight, category, notes, visual_description, created_at) VALUES (?,?,?,?,?,?,?,?)",
                     (p["id"], p["name"], p.get("specs",""), p.get("weight",""),
-                     p.get("category",""), p.get("notes",""), p.get("created_at","")),
+                     p.get("category",""), p.get("notes",""),
+                     p.get("visual_description",""), p.get("created_at","")),
                 )
             for i in data.get("images", []):
                 conn.execute(
