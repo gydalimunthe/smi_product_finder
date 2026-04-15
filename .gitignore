@@ -1,8 +1,8 @@
 .env
 *.db
-uploads/
 __pycache__/
 *.pyc
 .DS_Store
 catalog_import_map.json
 product_catalog/
+.claude/
