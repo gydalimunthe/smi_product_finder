@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Product Finder</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-inner">
+      <span class="nav-logo">📦 Product Finder</span>
+      <a href="/admin" class="nav-link">Admin Catalog</a>
+    </div>
+  </nav>
+
+  <main class="container">
+    <div class="hero">
+      <h1>Find a Product</h1>
+      <p>Upload a photo of the product and we'll identify it from the warehouse catalog.</p>
+    </div>
+
+    <!-- Upload Area -->
+    <div class="card upload-card" id="uploadCard">
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-icon">📷</div>
+        <p class="drop-text">Drag &amp; drop a photo here</p>
+        <p class="drop-sub">or</p>
+        <label class="btn btn-primary" for="fileInput">Choose Photo</label>
+        <input type="file" id="fileInput" accept="image/*" hidden />
+      </div>
+      <div class="preview-area hidden" id="previewArea">
+        <img id="previewImg" src="" alt="Preview" />
+        <div class="preview-actions">
+          <button class="btn btn-primary" id="identifyBtn">🔍 Identify Product</button>
+          <button class="btn btn-ghost" id="clearBtn">✕ Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading -->
+    <div class="card result-card hidden" id="loadingCard">
+      <div class="loading-spinner"></div>
+      <p class="loading-text">Analyzing photo…</p>
+    </div>
+
+    <!-- Result -->
+    <div class="card result-card hidden" id="resultCard">
+      <!-- filled by JS -->
+    </div>
+  </main>
+
+  <script src="/static/js/index.js"></script>
+</body>
+</html>
