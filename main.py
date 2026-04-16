@@ -14,10 +14,11 @@ from database import init_db, db_context
 load_dotenv(Path(__file__).parent / ".env")
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-MAX_FILE_SIZE      = 10 * 1024 * 1024   # 10 MB
+MAX_FILE_SIZE      = 10 * 1024 * 1024
 GROQ_MODEL         = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_BASE_URL      = "https://api.groq.com/openai/v1"
 PAGES_DIR          = Path(__file__).parent / "static" / "catalog_pages"
+THUMBS_DIR         = Path(__file__).parent / "static" / "catalog_thumbs"
 
 app = FastAPI(title="Product Finder")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -30,31 +31,26 @@ def get_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
 
 
-def b64_image(data: bytes, mime: str) -> dict:
-    """Return an image_url content block."""
+def img_block(data: bytes, mime: str) -> dict:
     b64 = base64.standard_b64encode(data).decode()
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
 
-def call_vision(client: OpenAI, content_blocks: list, prompt: str, max_tokens: int = 400) -> str:
+def call_vision(client: OpenAI, blocks: list, prompt: str, max_tokens: int = 200) -> str:
     r = client.chat.completions.create(
         model=GROQ_MODEL,
         max_tokens=max_tokens,
-        messages=[{
-            "role": "user",
-            "content": content_blocks + [{"type": "text", "text": prompt}],
-        }],
+        messages=[{"role": "user", "content": blocks + [{"type": "text", "text": prompt}]}],
     )
     return r.choices[0].message.content.strip()
 
 
 def parse_json(raw: str) -> dict:
-    if raw.startswith("```"):
+    if "```" in raw:
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-        raw = raw.strip()
-    return json.loads(raw)
+    return json.loads(raw.strip())
 
 
 def mime_for(filename: str) -> str:
@@ -68,8 +64,6 @@ def mime_for(filename: str) -> str:
 def startup():
     init_db()
 
-
-# ── Pages ──────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def index():
@@ -88,8 +82,6 @@ def list_pages():
     return [dict(r) for r in rows]
 
 
-# ── Identify ───────────────────────────────────────────────────────────────
-
 @app.post("/api/identify")
 async def identify_product(photo: UploadFile = File(...)):
     ext = Path(photo.filename or "").suffix.lower()
@@ -100,109 +92,122 @@ async def identify_product(photo: UploadFile = File(...)):
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Image too large (max 10 MB)")
 
-    # Load catalog page list
     with db_context() as conn:
         pages = conn.execute(
-            "SELECT page_number, category, image_filename, product_codes"
+            "SELECT page_number, category, image_filename"
             " FROM catalog_pages ORDER BY page_number"
         ).fetchall()
 
     if not pages:
-        return JSONResponse(status_code=200, content={
-            "matched": False, "message": "Catalog not loaded.",
-        })
+        return JSONResponse(content={"matched": False, "message": "Catalog not loaded."})
 
-    mime          = mime_for(photo.filename or "")
-    worker_block  = b64_image(content, mime)
+    mime         = mime_for(photo.filename or "")
+    worker_block = img_block(content, mime)
 
     try:
         client = get_client()
     except HTTPException:
         raise
 
-    # ── STEP 1: Find the best matching catalog page ─────────────────────────
-    catalog_text = "\n".join(
-        f"Page {p['page_number']} — {p['category']}: {(p['product_codes'] or '')[:200]}"
-        for p in pages
-    )
+    # ── STEP 1: Visual scan — worker photo + ALL 50 thumbnails ─────────────
+    # Build image blocks: worker photo first, then all 50 thumbnails in order
+    step1_blocks = [worker_block]
 
-    step1_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+    page_list_text = []
+    for p in pages:
+        thumb_path = THUMBS_DIR / p["image_filename"]
+        if thumb_path.exists():
+            step1_blocks.append(img_block(thumb_path.read_bytes(), "image/jpeg"))
+            page_list_text.append(
+                f"Thumbnail {p['page_number']}: {p['category']}"
+            )
 
-Look at the uploaded product photo carefully.
-Below are 50 catalog pages with their category and product codes.
-Find the ONE page number that most likely contains this product.
+    step1_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse catalog.
 
-{catalog_text}
+The FIRST image is a photo taken by a warehouse worker of a product they want to identify.
+The REMAINING images are thumbnails of catalog pages 1–50, in order.
 
-Reply ONLY with valid JSON (no markdown):
-{{"page": <int 1-50>, "confidence": "high"|"medium"|"low"}}"""
+Here is what each thumbnail page covers:
+{chr(10).join(page_list_text)}
+
+Study the worker's photo carefully. Look at the shape, style, silhouette, and type of the item.
+Then scan the catalog thumbnails to find which page visually contains that same type of product.
+
+Return ONLY valid JSON — no markdown, no explanation:
+{{"pages": [<top 3 page numbers most likely to contain this product, best first>], "confidence": "high"|"medium"|"low"}}"""
 
     try:
-        raw1 = call_vision(client, [worker_block], step1_prompt, max_tokens=60)
-        step1 = parse_json(raw1)
+        raw1   = call_vision(client, step1_blocks, step1_prompt, max_tokens=80)
+        step1  = parse_json(raw1)
+        candidates = step1.get("pages", [])[:3]   # up to 3 candidate pages
+        confidence = step1.get("confidence", "medium")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Step 1 error: {e}")
 
-    page_num = step1.get("page")
-    if not page_num:
-        return JSONResponse(status_code=200, content={"matched": False,
+    if not candidates:
+        return JSONResponse(content={"matched": False,
             "message": "Could not identify a matching catalog page."})
 
-    matched_page = next((p for p in pages if p["page_number"] == page_num), None)
-    if not matched_page:
-        return JSONResponse(status_code=200, content={"matched": False,
-            "message": f"Page {page_num} not found in catalog."})
+    # ── STEP 2: Read full-res page → identify exact product ────────────────
+    # Try candidates in order; stop at the first confident match
+    best_result = None
 
-    # ── STEP 2: Read catalog page image → identify exact product ───────────
-    catalog_img_path = PAGES_DIR / matched_page["image_filename"]
-    if not catalog_img_path.exists():
-        return JSONResponse(status_code=200, content={"matched": False,
-            "message": f"Catalog image for page {page_num} not found."})
+    for page_num in candidates:
+        matched_page = next((p for p in pages if p["page_number"] == page_num), None)
+        if not matched_page:
+            continue
 
-    catalog_img_bytes = catalog_img_path.read_bytes()
-    catalog_block     = b64_image(catalog_img_bytes, "image/jpeg")
+        full_img_path = PAGES_DIR / matched_page["image_filename"]
+        if not full_img_path.exists():
+            continue
 
-    step2_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+        catalog_block = img_block(full_img_path.read_bytes(), "image/jpeg")
 
-You have two images:
-  IMAGE 1 — A photo taken by a warehouse worker of a product they want to identify.
-  IMAGE 2 — Page {page_num} of the Maxweld catalog (category: {matched_page['category']}).
+        step2_prompt = f"""You have two images:
+  IMAGE 1 — A warehouse worker's photo of a product to identify.
+  IMAGE 2 — Page {page_num} of the Maxweld catalog ({matched_page['category']}).
 
-Study both images carefully. Find the product in the catalog page that best matches the worker's photo.
+Carefully compare the product in IMAGE 1 against every item shown on the catalog page in IMAGE 2.
+Look for matching shape, silhouette, scroll style, proportions, and design details.
 
-Read the product details exactly as printed on the catalog page and return ONLY valid JSON:
-
-If you can identify the product:
+If you find a match, return ONLY valid JSON:
 {{
   "matched": true,
-  "product_code": "<exact code as printed, e.g. 6182 or 5413A or DR11>",
-  "product_name": "<code + short description, e.g. '6182 Forged Flower Panel'>",
-  "dimensions":   "<size as printed, e.g. 24\\" x 28-3/4\\" or R 22\\">",
-  "weight":       "<weight as printed, e.g. 21.5 Lbs>",
-  "specs":        "<material/rod size as printed, e.g. 5/16\\"x5/8\\" or Sq.1/2\\">",
+  "product_code": "<exact bold code from the page, e.g. 6182 or 5413A or DR11>",
+  "product_name": "<code + brief description, e.g. '6182 Forged Flower Panel'>",
+  "dimensions":   "<size exactly as printed>",
+  "weight":       "<weight exactly as printed, e.g. 21.5 Lbs>",
+  "specs":        "<rod/material size as printed, e.g. 5/16\\"x5/8\\" or Sq.1/2\\">",
   "confidence":   "high"|"medium"|"low",
-  "reason":       "<one sentence: what visual features matched>"
+  "reason":       "<one sentence: specific visual features that matched>"
 }}
 
-If no product on that page matches:
-{{"matched": false, "reason": "<why no match>"}}"""
+If no product on this page matches the photo, return:
+{{"matched": false}}"""
 
-    try:
-        raw2   = call_vision(client, [worker_block, catalog_block], step2_prompt, max_tokens=300)
-        result = parse_json(raw2)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Step 2 error: {e}")
+        try:
+            raw2   = call_vision(client, [worker_block, catalog_block], step2_prompt, max_tokens=300)
+            result = parse_json(raw2)
+        except Exception:
+            continue   # try next candidate page
 
-    # Attach page info to the result
-    result["page_number"] = page_num
-    result["category"]    = matched_page["category"]
-    result["image_url"]   = f"/static/catalog_pages/{matched_page['image_filename']}"
+        if result.get("matched"):
+            result["page_number"] = page_num
+            result["category"]    = matched_page["category"]
+            result["image_url"]   = f"/static/catalog_pages/{matched_page['image_filename']}"
+            best_result = result
+            break   # found a confident match
 
-    # If step 2 says no match but step 1 was confident, still show the page
-    if not result.get("matched"):
-        result["matched"]  = False
-        result["page_number"] = page_num
-        result["category"]    = matched_page["category"]
-        result["image_url"]   = f"/static/catalog_pages/{matched_page['image_filename']}"
+    # If no step 2 match, fall back to showing the top candidate page
+    if not best_result:
+        fb_num  = candidates[0]
+        fb_page = next((p for p in pages if p["page_number"] == fb_num), None)
+        return JSONResponse(content={
+            "matched":      False,
+            "page_number":  fb_num,
+            "category":     fb_page["category"] if fb_page else "",
+            "image_url":    f"/static/catalog_pages/{fb_page['image_filename']}" if fb_page else "",
+            "reason":       "Product type found in catalog but could not pin exact item — check the page below.",
+        })
 
-    return result
+    return best_result

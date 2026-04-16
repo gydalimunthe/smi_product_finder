@@ -16,13 +16,15 @@ from pathlib import Path
 import pdfplumber
 import pypdfium2 as pdfium
 
-PDF_DIR   = Path("/Users/Rafikaaa_ND/Downloads/maxweld_catalog_first4rows")
-PROJECT   = Path(__file__).parent
-PAGES_DIR = PROJECT / "static" / "catalog_pages"
-SEED_FILE = PROJECT / "seed_data.json"
-DB_PATH   = PROJECT / "products.db"
+PDF_DIR    = Path("/Users/Rafikaaa_ND/Downloads/maxweld_catalog_first4rows")
+PROJECT    = Path(__file__).parent
+PAGES_DIR  = PROJECT / "static" / "catalog_pages"
+THUMBS_DIR = PROJECT / "static" / "catalog_thumbs"
+SEED_FILE  = PROJECT / "seed_data.json"
+DB_PATH    = PROJECT / "products.db"
 
 PAGES_DIR.mkdir(parents=True, exist_ok=True)
+THUMBS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Correct category per page ───────────────────────────────────────────────
 CATEGORY_MAP = {
@@ -96,6 +98,13 @@ def extract_codes(text: str) -> list[str]:
     return out
 
 
+def make_thumbnail(src: Path, dst: Path, max_width: int = 220):
+    from PIL import Image
+    img = Image.open(src)
+    img.thumbnail((max_width, max_width * 2), Image.LANCZOS)
+    img.save(dst, "JPEG", quality=65, optimize=True)
+
+
 def pdf_to_jpeg(pdf_path: Path, out_path: Path, scale: float = 2.0):
     """Render the first (only) page of a PDF to JPEG."""
     doc  = pdfium.PdfDocument(str(pdf_path))
@@ -125,6 +134,10 @@ def main():
         img_path = PAGES_DIR / img_name
         pdf_to_jpeg(pdf_path, img_path, scale=2.0)
         size_kb  = img_path.stat().st_size // 1024
+
+        # Also generate thumbnail
+        thumb_path = THUMBS_DIR / img_name
+        make_thumbnail(img_path, thumb_path)
 
         print(f"  p{num:02d}  {category:<45s} {len(codes):3d} codes  {size_kb} KB")
 
