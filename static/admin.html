@@ -17,91 +17,96 @@
   <main class="container">
     <div class="hero">
       <h1>Product Catalog</h1>
-      <p>Add, edit, or remove products. Upload reference photos so the AI can identify them.</p>
+      <p>All 50 Maxweld catalog pages. Workers upload a photo to find the matching page.</p>
     </div>
 
-    <div class="admin-layout">
-      <!-- Left: Add / Edit Form -->
-      <div class="card form-card">
-        <h2 id="formTitle">Add New Product</h2>
-        <form id="productForm" novalidate>
-          <input type="hidden" id="editingId" value="" />
+    <div class="list-header" style="margin-bottom:20px;">
+      <h2>Catalog Pages <span class="count-badge" id="pageCount">0</span></h2>
+      <input type="text" id="searchInput" class="search-input" placeholder="Search category…" />
+    </div>
 
-          <div class="form-group">
-            <label for="fName">Product Name <span class="required">*</span></label>
-            <input type="text" id="fName" placeholder="e.g. 3M Safety Helmet Type-1" required />
-          </div>
-
-          <div class="form-row">
-            <div class="form-group">
-              <label for="fCategory">Category</label>
-              <input type="text" id="fCategory" placeholder="e.g. Safety, Tools, Electrical" />
-            </div>
-            <div class="form-group">
-              <label for="fWeight">Weight</label>
-              <input type="text" id="fWeight" placeholder="e.g. 450g, 2.3kg" />
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label for="fSpecs">Specs / Description</label>
-            <textarea id="fSpecs" rows="3" placeholder="e.g. HDPE shell, EN397 certified, adjustable ratchet…"></textarea>
-          </div>
-
-          <div class="form-group">
-            <label for="fNotes">Internal Notes</label>
-            <textarea id="fNotes" rows="2" placeholder="e.g. Located in aisle B-3, shelf 2"></textarea>
-          </div>
-
-          <div class="form-group">
-            <label>Reference Photos</label>
-            <div class="img-drop-zone" id="imgDropZone">
-              <span>📁 Click or drag photos here</span>
-              <input type="file" id="imgInput" accept="image/*" multiple hidden />
-            </div>
-            <div class="img-preview-grid" id="imgPreviewGrid"></div>
-          </div>
-
-          <!-- Edit mode: existing images -->
-          <div class="form-group hidden" id="existingImagesGroup">
-            <label>Current Photos</label>
-            <div class="img-preview-grid" id="existingImagesGrid"></div>
-          </div>
-
-          <div class="form-actions">
-            <button type="submit" class="btn btn-primary" id="submitBtn">Add Product</button>
-            <button type="button" class="btn btn-ghost hidden" id="cancelEditBtn">Cancel</button>
-          </div>
-
-          <div class="form-msg hidden" id="formMsg"></div>
-        </form>
-      </div>
-
-      <!-- Right: Product List -->
-      <div class="product-list-panel">
-        <div class="list-header">
-          <h2>All Products <span class="count-badge" id="productCount">0</span></h2>
-          <input type="text" id="searchInput" class="search-input" placeholder="Search…" />
-        </div>
-        <div id="productList" class="product-list">
-          <p class="empty-msg">No products yet. Add your first one!</p>
-        </div>
-      </div>
+    <div id="pageGrid" class="page-grid">
+      <p class="empty-msg">Loading…</p>
     </div>
   </main>
 
-  <!-- Edit modal overlay (reuses the same form via JS) -->
-  <div class="modal-overlay hidden" id="deleteModal">
-    <div class="modal-box">
-      <h3>Delete Product?</h3>
-      <p id="deleteModalMsg"></p>
-      <div class="modal-actions">
-        <button class="btn btn-danger" id="confirmDeleteBtn">Delete</button>
-        <button class="btn btn-ghost" id="cancelDeleteBtn">Cancel</button>
-      </div>
+  <!-- Lightbox -->
+  <div class="lightbox-overlay hidden" id="lightbox">
+    <div class="lightbox-inner">
+      <button class="lightbox-close" id="lightboxClose">✕</button>
+      <img id="lightboxImg" src="" alt="" />
     </div>
   </div>
 
-  <script src="/static/js/admin.js"></script>
+  <script>
+    const pageGrid   = document.getElementById('pageGrid');
+    const pageCount  = document.getElementById('pageCount');
+    const searchInput = document.getElementById('searchInput');
+    const lightbox   = document.getElementById('lightbox');
+    const lightboxImg = document.getElementById('lightboxImg');
+
+    let allPages = [];
+
+    async function loadPages() {
+      const res = await fetch('/api/pages');
+      allPages  = await res.json();
+      pageCount.textContent = allPages.length;
+      renderGrid(allPages);
+    }
+
+    searchInput.addEventListener('input', () => {
+      const q = searchInput.value.toLowerCase();
+      renderGrid(allPages.filter(p =>
+        p.category.toLowerCase().includes(q) ||
+        String(p.page_number).includes(q) ||
+        (p.product_codes || '').toLowerCase().includes(q)
+      ));
+    });
+
+    function renderGrid(pages) {
+      if (!pages.length) {
+        pageGrid.innerHTML = '<p class="empty-msg">No pages found.</p>';
+        return;
+      }
+      pageGrid.innerHTML = pages.map(p => `
+        <div class="page-card" onclick="openPage('${esc(p.image_filename)}', ${p.page_number}, '${esc(p.category)}')">
+          <img
+            class="page-thumb"
+            src="/static/catalog_pages/${esc(p.image_filename)}"
+            alt="Page ${p.page_number}"
+            loading="lazy"
+          />
+          <div class="page-card-info">
+            <span class="page-num-badge">Page ${p.page_number}</span>
+            <p class="page-cat">${esc(p.category)}</p>
+          </div>
+        </div>`).join('');
+    }
+
+    function openPage(filename, num, category) {
+      lightboxImg.src = `/static/catalog_pages/${filename}`;
+      lightboxImg.alt = `Page ${num} — ${category}`;
+      lightbox.classList.remove('hidden');
+    }
+
+    document.getElementById('lightboxClose').addEventListener('click', () => {
+      lightbox.classList.add('hidden');
+      lightboxImg.src = '';
+    });
+    lightbox.addEventListener('click', e => {
+      if (e.target === lightbox) {
+        lightbox.classList.add('hidden');
+        lightboxImg.src = '';
+      }
+    });
+
+    function esc(str) {
+      return String(str)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    loadPages();
+  </script>
 </body>
 </html>

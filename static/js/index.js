@@ -32,8 +32,7 @@ dropZone.addEventListener('click', e => {
 
 function showPreview(file) {
   selectedFile = file;
-  const url = URL.createObjectURL(file);
-  previewImg.src = url;
+  previewImg.src = URL.createObjectURL(file);
   dropZone.classList.add('hidden');
   previewArea.classList.remove('hidden');
   loadingCard.classList.add('hidden');
@@ -68,7 +67,7 @@ identifyBtn.addEventListener('click', async () => {
     const res  = await fetch('/api/identify', { method: 'POST', body: fd });
     const data = await res.json();
     renderResult(data);
-  } catch (err) {
+  } catch {
     renderError('Network error. Please try again.');
   } finally {
     identifyBtn.disabled = false;
@@ -76,7 +75,7 @@ identifyBtn.addEventListener('click', async () => {
   }
 });
 
-// ── Render result ──────────────────────────────────────────────────────────
+// ── Render ─────────────────────────────────────────────────────────────────
 
 function confidenceBadge(level) {
   const map = {
@@ -91,45 +90,46 @@ function confidenceBadge(level) {
 function renderResult(data) {
   resultCard.classList.remove('hidden');
 
-  if (data.matched && data.product) {
-    const p   = data.product;
-    const imgs = (p.images || [])
-      .slice(0, 4)
-      .map(i => `<img src="/uploads/${i.filename}" alt="${p.name}" />`)
-      .join('');
-
-    const specs = p.specs
-      ? `<div class="result-field"><label>Specs</label><p>${esc(p.specs)}</p></div>` : '';
-    const weight = p.weight
-      ? `<div class="result-field"><label>Weight</label><p>${esc(p.weight)}</p></div>` : '';
-    const category = p.category
-      ? `<div class="result-field"><label>Category</label><p>${esc(p.category)}</p></div>` : '';
-    const notes = p.notes
-      ? `<div class="result-notes">📝 ${esc(p.notes)}</div>` : '';
-
+  if (data.matched && data.image_url) {
     resultCard.innerHTML = `
       <div class="result-matched">
         <div class="result-header">
           ${confidenceBadge(data.confidence)}
-          <h2 class="result-product-name">${esc(p.name)}</h2>
+          <div class="result-title-block">
+            <span class="result-page-label">Catalog Page ${esc(data.page_number)}</span>
+            <h2 class="result-product-name">${esc(data.category)}</h2>
+          </div>
         </div>
-        ${imgs ? `<div class="result-images">${imgs}</div>` : ''}
-        <div class="result-grid">
-          ${category}${weight}${specs}
+
+        ${data.reason
+          ? `<p class="result-reason">"${esc(data.reason)}"</p>`
+          : ''}
+
+        <div class="catalog-page-wrap">
+          <img
+            class="catalog-page-img"
+            src="${esc(data.image_url)}"
+            alt="Catalog page ${esc(data.page_number)}"
+            onclick="openFullscreen(this)"
+            title="Click to view full size"
+          />
+          <p class="catalog-page-hint">📌 Tap image to view full size</p>
         </div>
-        ${notes}
-        ${data.reason ? `<p class="result-reason">"${esc(data.reason)}"</p>` : ''}
-        <button class="btn btn-ghost btn-search-again" onclick="resetAll()">🔍 Search Again</button>
+
+        <button class="btn btn-ghost btn-search-again" onclick="resetAll()">
+          🔍 Search Again
+        </button>
       </div>`;
   } else {
-    const desc = data.description || data.message || 'No matching product found in the catalog.';
+    const msg = data.message || data.reason || 'No matching product found in the catalog.';
     resultCard.innerHTML = `
       <div class="result-no-match">
         <div class="no-match-icon">🔎</div>
         <h3>No Match Found</h3>
-        <p>${esc(desc)}</p>
-        ${data.reason ? `<p class="result-reason" style="margin-top:8px">${esc(data.reason)}</p>` : ''}
-        <button class="btn btn-ghost btn-search-again" onclick="resetAll()">Try Another Photo</button>
+        <p>${esc(msg)}</p>
+        <button class="btn btn-ghost btn-search-again" onclick="resetAll()">
+          Try Another Photo
+        </button>
       </div>`;
   }
 }
@@ -143,6 +143,22 @@ function renderError(msg) {
       <p>${esc(msg)}</p>
       <button class="btn btn-ghost btn-search-again" onclick="resetAll()">Try Again</button>
     </div>`;
+}
+
+// ── Fullscreen lightbox ────────────────────────────────────────────────────
+
+function openFullscreen(img) {
+  const overlay = document.createElement('div');
+  overlay.className = 'lightbox-overlay';
+  overlay.innerHTML = `
+    <div class="lightbox-inner">
+      <button class="lightbox-close" onclick="this.closest('.lightbox-overlay').remove()">✕</button>
+      <img src="${img.src}" alt="${img.alt}" />
+    </div>`;
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.appendChild(overlay);
 }
 
 function esc(str) {
