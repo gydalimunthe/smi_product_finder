@@ -120,10 +120,8 @@ body {
 
 /* ── Result Card ──────────────────────────────────────────────────────────── */
 .result-matched { text-align: left; }
-.result-header {
-  display: flex; align-items: center; gap: 12px;
-  margin-bottom: 20px;
-}
+.result-header  { margin-bottom: 16px; }
+
 .result-badge {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 12px; border-radius: 999px;
@@ -133,39 +131,87 @@ body {
 .badge-warn    { background: #fef9c3; color: var(--warn); }
 .badge-danger  { background: #fee2e2; color: var(--danger); }
 
-.result-product-name { font-size: 1.4rem; font-weight: 700; }
-.result-images {
-  display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px;
-}
-.result-images img {
-  width: 80px; height: 80px; object-fit: cover;
-  border-radius: 8px; border: 1px solid var(--border);
-}
-.result-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+/* Product identity block */
+.product-identity {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
   margin-bottom: 16px;
 }
-.result-field label {
-  font-size: .75rem; text-transform: uppercase;
-  letter-spacing: .05em; color: var(--muted);
-  display: block; margin-bottom: 2px;
+.product-code-block {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
 }
-.result-field p {
-  font-size: .95rem; font-weight: 500;
+.product-code-label {
+  font-size: .72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--muted);
 }
-.result-notes {
-  background: var(--bg); border-radius: 8px;
-  padding: 12px 14px; font-size: .9rem;
-  color: var(--muted); margin-top: 4px;
+.product-code {
+  font-size: 1.7rem; font-weight: 800;
+  color: var(--primary); letter-spacing: .02em;
+  font-family: ui-monospace, "Cascadia Code", monospace;
 }
+.product-full-name {
+  font-size: 1rem; font-weight: 600; color: var(--text);
+  margin: 0;
+}
+
+/* Spec grid */
+.spec-grid {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-bottom: 14px;
+}
+.spec-row {
+  display: flex; gap: 10px; align-items: baseline;
+  font-size: .88rem;
+}
+.spec-label {
+  min-width: 80px; font-size: .72rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); flex-shrink: 0;
+}
+.spec-value { font-weight: 500; color: var(--text); }
+
 .result-reason {
-  font-size: .85rem; color: var(--muted);
-  margin-top: 12px; font-style: italic;
+  font-size: .83rem; color: var(--muted);
+  margin-bottom: 14px; font-style: italic;
+  line-height: 1.5;
 }
+
+/* Catalog page section */
+.catalog-section { margin-top: 4px; }
+.catalog-section-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+.catalog-page-tag {
+  font-size: .8rem; font-weight: 700; color: var(--text);
+}
+.catalog-zoom-hint {
+  font-size: .72rem; color: var(--muted);
+}
+
+.catalog-page-wrap {
+  border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden;
+  background: #fff; margin-bottom: 18px;
+}
+.catalog-page-img {
+  width: 100%; display: block;
+  cursor: zoom-in; transition: opacity .15s;
+}
+.catalog-page-img:hover { opacity: .9; }
+
+/* No match */
 .result-no-match { text-align: center; padding: 8px 0; }
 .result-no-match .no-match-icon { font-size: 3rem; margin-bottom: 12px; }
 .result-no-match h3 { font-size: 1.1rem; margin-bottom: 8px; }
 .result-no-match p  { color: var(--muted); font-size: .9rem; }
+
+/* Loading sub-text */
+.loading-sub {
+  font-size: .8rem; color: var(--muted); margin-top: 4px;
+}
 
 .btn-search-again { margin-top: 20px; }
 
@@ -362,6 +408,10 @@ body {
   z-index: 10;
 }
 .lightbox-close:hover { background: var(--danger); color: #fff; }
+.lightbox-caption {
+  text-align: center; color: rgba(255,255,255,.75);
+  font-size: .82rem; margin-top: 10px;
+}
 
 /* ── Admin: catalog page grid ─────────────────────────────────────────────── */
 .page-grid {

@@ -17,9 +17,10 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MAX_FILE_SIZE      = 10 * 1024 * 1024   # 10 MB
 GROQ_MODEL         = "meta-llama/llama-4-scout-17b-16e-instruct"
 GROQ_BASE_URL      = "https://api.groq.com/openai/v1"
+PAGES_DIR          = Path(__file__).parent / "static" / "catalog_pages"
 
 app = FastAPI(title="Product Finder")
-app.mount("/static",  StaticFiles(directory="static"),  name="static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 def get_client() -> OpenAI:
@@ -29,25 +30,25 @@ def get_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
 
 
-def call_vision(client: OpenAI, image_bytes: bytes, mime: str, prompt: str) -> str:
-    b64 = base64.standard_b64encode(image_bytes).decode()
+def b64_image(data: bytes, mime: str) -> dict:
+    """Return an image_url content block."""
+    b64 = base64.standard_b64encode(data).decode()
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
+def call_vision(client: OpenAI, content_blocks: list, prompt: str, max_tokens: int = 400) -> str:
     r = client.chat.completions.create(
         model=GROQ_MODEL,
-        max_tokens=256,
+        max_tokens=max_tokens,
         messages=[{
             "role": "user",
-            "content": [
-                {"type": "image_url",
-                 "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                {"type": "text", "text": prompt},
-            ],
+            "content": content_blocks + [{"type": "text", "text": prompt}],
         }],
     )
     return r.choices[0].message.content.strip()
 
 
 def parse_json(raw: str) -> dict:
-    """Strip markdown fences if present, then parse JSON."""
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -57,12 +58,10 @@ def parse_json(raw: str) -> dict:
 
 
 def mime_for(filename: str) -> str:
-    ext = Path(filename or "").suffix.lower()
     return {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".png": "image/png",  ".webp": "image/webp",
-        ".gif": "image/gif",
-    }.get(ext, "image/jpeg")
+        ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+    }.get(Path(filename or "").suffix.lower(), "image/jpeg")
 
 
 @app.on_event("startup")
@@ -76,17 +75,12 @@ def startup():
 def index():
     return FileResponse("static/index.html")
 
-
 @app.get("/admin")
 def admin():
     return FileResponse("static/admin.html")
 
-
-# ── Catalog API ────────────────────────────────────────────────────────────
-
 @app.get("/api/pages")
 def list_pages():
-    """Return all 50 catalog pages (for admin / browse)."""
     with db_context() as conn:
         rows = conn.execute(
             "SELECT * FROM catalog_pages ORDER BY page_number"
@@ -106,7 +100,7 @@ async def identify_product(photo: UploadFile = File(...)):
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Image too large (max 10 MB)")
 
-    # Load catalog pages from DB
+    # Load catalog page list
     with db_context() as conn:
         pages = conn.execute(
             "SELECT page_number, category, image_filename, product_codes"
@@ -115,56 +109,100 @@ async def identify_product(photo: UploadFile = File(...)):
 
     if not pages:
         return JSONResponse(status_code=200, content={
-            "matched": False,
-            "message": "Catalog not loaded. Contact admin.",
+            "matched": False, "message": "Catalog not loaded.",
         })
 
-    # Build compact catalog context for the AI
-    catalog_lines = []
-    for p in pages:
-        codes = (p["product_codes"] or "")[:300]
-        catalog_lines.append(
-            f"Page {p['page_number']} — {p['category']}: {codes}"
-        )
-    catalog_text = "\n".join(catalog_lines)
+    mime          = mime_for(photo.filename or "")
+    worker_block  = b64_image(content, mime)
 
-    prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+    try:
+        client = get_client()
+    except HTTPException:
+        raise
 
-Study the uploaded product photo carefully — look at shape, style, and type.
+    # ── STEP 1: Find the best matching catalog page ─────────────────────────
+    catalog_text = "\n".join(
+        f"Page {p['page_number']} — {p['category']}: {(p['product_codes'] or '')[:200]}"
+        for p in pages
+    )
 
-Below are 50 catalog pages. Each line shows the page number, category, and product codes on that page.
-Find the ONE page that best matches the product in the photo:
+    step1_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+
+Look at the uploaded product photo carefully.
+Below are 50 catalog pages with their category and product codes.
+Find the ONE page number that most likely contains this product.
 
 {catalog_text}
 
 Reply ONLY with valid JSON (no markdown):
-If matched:   {{"matched":true,"page":<int>,"confidence":"high"|"medium"|"low","reason":"<one sentence>"}}
-If not found: {{"matched":false,"reason":"<why no match>"}}"""
+{{"page": <int 1-50>, "confidence": "high"|"medium"|"low"}}"""
 
     try:
-        client = get_client()
-        mime   = mime_for(photo.filename or "")
-        raw    = call_vision(client, content, mime, prompt)
-    except HTTPException:
-        raise
+        raw1 = call_vision(client, [worker_block], step1_prompt, max_tokens=60)
+        step1 = parse_json(raw1)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Groq API error: {e}")
+        raise HTTPException(status_code=502, detail=f"Step 1 error: {e}")
+
+    page_num = step1.get("page")
+    if not page_num:
+        return JSONResponse(status_code=200, content={"matched": False,
+            "message": "Could not identify a matching catalog page."})
+
+    matched_page = next((p for p in pages if p["page_number"] == page_num), None)
+    if not matched_page:
+        return JSONResponse(status_code=200, content={"matched": False,
+            "message": f"Page {page_num} not found in catalog."})
+
+    # ── STEP 2: Read catalog page image → identify exact product ───────────
+    catalog_img_path = PAGES_DIR / matched_page["image_filename"]
+    if not catalog_img_path.exists():
+        return JSONResponse(status_code=200, content={"matched": False,
+            "message": f"Catalog image for page {page_num} not found."})
+
+    catalog_img_bytes = catalog_img_path.read_bytes()
+    catalog_block     = b64_image(catalog_img_bytes, "image/jpeg")
+
+    step2_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+
+You have two images:
+  IMAGE 1 — A photo taken by a warehouse worker of a product they want to identify.
+  IMAGE 2 — Page {page_num} of the Maxweld catalog (category: {matched_page['category']}).
+
+Study both images carefully. Find the product in the catalog page that best matches the worker's photo.
+
+Read the product details exactly as printed on the catalog page and return ONLY valid JSON:
+
+If you can identify the product:
+{{
+  "matched": true,
+  "product_code": "<exact code as printed, e.g. 6182 or 5413A or DR11>",
+  "product_name": "<code + short description, e.g. '6182 Forged Flower Panel'>",
+  "dimensions":   "<size as printed, e.g. 24\\" x 28-3/4\\" or R 22\\">",
+  "weight":       "<weight as printed, e.g. 21.5 Lbs>",
+  "specs":        "<material/rod size as printed, e.g. 5/16\\"x5/8\\" or Sq.1/2\\">",
+  "confidence":   "high"|"medium"|"low",
+  "reason":       "<one sentence: what visual features matched>"
+}}
+
+If no product on that page matches:
+{{"matched": false, "reason": "<why no match>"}}"""
 
     try:
-        result = parse_json(raw)
-    except json.JSONDecodeError:
-        return JSONResponse(status_code=200, content={
-            "matched": False,
-            "message": "Could not parse AI response.",
-            "raw": raw,
-        })
+        raw2   = call_vision(client, [worker_block, catalog_block], step2_prompt, max_tokens=300)
+        result = parse_json(raw2)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Step 2 error: {e}")
 
-    if result.get("matched") and result.get("page"):
-        pg = next((p for p in pages if p["page_number"] == result["page"]), None)
-        if pg:
-            result["category"]      = pg["category"]
-            result["image_url"]     = f"/static/catalog_pages/{pg['image_filename']}"
-            result["product_codes"] = pg["product_codes"]
-            result["page_number"]   = pg["page_number"]
+    # Attach page info to the result
+    result["page_number"] = page_num
+    result["category"]    = matched_page["category"]
+    result["image_url"]   = f"/static/catalog_pages/{matched_page['image_filename']}"
+
+    # If step 2 says no match but step 1 was confident, still show the page
+    if not result.get("matched"):
+        result["matched"]  = False
+        result["page_number"] = page_num
+        result["category"]    = matched_page["category"]
+        result["image_url"]   = f"/static/catalog_pages/{matched_page['image_filename']}"
 
     return result
