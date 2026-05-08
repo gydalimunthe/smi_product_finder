@@ -1,9 +1,9 @@
 import os
-import base64
 import json
 from pathlib import Path
 
-import anthropic
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
@@ -16,37 +16,28 @@ load_dotenv(Path(__file__).parent / ".env")
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MAX_FILE_SIZE      = 10 * 1024 * 1024
 PAGES_DIR          = Path(__file__).parent / "static" / "catalog_pages"
-MODEL              = "claude-haiku-4-5"   # fast + good vision; upgrade to sonnet if needed
+MODEL              = "gemini-2.0-flash"
 
 app = FastAPI(title="Product Finder")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-def get_client() -> anthropic.Anthropic:
-    key = os.getenv("ANTHROPIC_API_KEY")
+def get_client() -> genai.Client:
+    key = os.getenv("GOOGLE_API_KEY")
     if not key:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
-    return anthropic.Anthropic(api_key=key)
+        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not set")
+    return genai.Client(api_key=key)
 
 
-def image_content(data: bytes, media_type: str) -> dict:
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": media_type,
-            "data": base64.standard_b64encode(data).decode(),
-        },
-    }
-
-
-def ask_claude(client: anthropic.Anthropic, blocks: list, max_tokens: int = 200) -> str:
-    resp = client.messages.create(
+def ask_gemini(client: genai.Client, image_data: bytes, media_type: str, prompt: str) -> str:
+    response = client.models.generate_content(
         model=MODEL,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": blocks}],
+        contents=[
+            types.Part.from_bytes(data=image_data, mime_type=media_type),
+            prompt,
+        ],
     )
-    return resp.content[0].text.strip()
+    return response.text.strip()
 
 
 def parse_json(raw: str) -> dict:
@@ -96,10 +87,8 @@ async def identify_product(photo: UploadFile = File(...)):
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Image too large (max 10 MB)")
 
-    media_type  = media_type_for(photo.filename or "")
-    photo_block = image_content(content, media_type)
-
-    client = get_client()
+    media_type = media_type_for(photo.filename or "")
+    client     = get_client()
 
     # ── Get all unique categories from the DB ──────────────────────────────
     with db_context() as conn:
@@ -110,11 +99,7 @@ async def identify_product(photo: UploadFile = File(...)):
 
     # ── STEP 1: Classify product category ─────────────────────────────────
     cat_list = "\n".join(f"- {c}" for c in categories)
-    step1_blocks = [
-        photo_block,
-        {
-            "type": "text",
-            "text": f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+    step1_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse.
 
 Look at this product photo carefully.
 
@@ -123,12 +108,10 @@ Choose the ONE category from the list below that best matches what you see:
 {cat_list}
 
 Reply ONLY with valid JSON — no explanation:
-{{"category": "<exact category name from the list above>", "confidence": "high"|"medium"|"low"}}""",
-        },
-    ]
+{{"category": "<exact category name from the list above>", "confidence": "high"|"medium"|"low"}}"""
 
     try:
-        raw1     = ask_claude(client, step1_blocks, max_tokens=80)
+        raw1     = ask_gemini(client, content, media_type, step1_prompt)
         step1    = parse_json(raw1)
         category = step1.get("category", "").strip()
     except Exception as e:
@@ -168,11 +151,7 @@ Reply ONLY with valid JSON — no explanation:
 
     product_catalog = "\n".join(product_lines)
 
-    step2_blocks = [
-        photo_block,
-        {
-            "type": "text",
-            "text": f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+    step2_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse.
 
 Look at the product in the photo carefully.
 
@@ -193,12 +172,10 @@ Reply ONLY with valid JSON — no explanation:
 }}
 
 If nothing matches at all:
-{{"matched": false, "reason": "<why>"}}""",
-        },
-    ]
+{{"matched": false, "reason": "<why>"}}"""
 
     try:
-        raw2   = ask_claude(client, step2_blocks, max_tokens=200)
+        raw2   = ask_gemini(client, content, media_type, step2_prompt)
         result = parse_json(raw2)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Identification error: {e}")
