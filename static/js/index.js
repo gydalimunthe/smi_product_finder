@@ -63,7 +63,7 @@ identifyBtn.addEventListener('click', async () => {
   loadingCard.innerHTML = `
     <div class="loading-spinner"></div>
     <p class="loading-text">Analyzing photo…</p>
-    <p class="loading-sub">Step 1 of 2: Finding catalog page</p>`;
+    <p class="loading-sub">Searching 892 products in catalog</p>`;
   resultCard.classList.add('hidden');
 
   const fd = new FormData();
@@ -72,7 +72,7 @@ identifyBtn.addEventListener('click', async () => {
   // Simulate step 2 message after ~2s
   const stepTimer = setTimeout(() => {
     const sub = loadingCard.querySelector('.loading-sub');
-    if (sub) sub.textContent = 'Step 2 of 2: Reading catalog page…';
+    if (sub) sub.textContent = 'Matching against catalog…';
   }, 2500);
 
   try {
@@ -107,10 +107,11 @@ function renderResult(data) {
   if (data.matched && data.product_code) {
     // Full match: product identified with code, specs, and catalog page
     const details = [
-      data.dimensions ? `<div class="spec-row"><span class="spec-label">Dimensions</span><span class="spec-value">${esc(data.dimensions)}</span></div>` : '',
-      data.weight     ? `<div class="spec-row"><span class="spec-label">Weight</span><span class="spec-value">${esc(data.weight)}</span></div>` : '',
-      data.specs      ? `<div class="spec-row"><span class="spec-label">Material</span><span class="spec-value">${esc(data.specs)}</span></div>` : '',
-      data.category   ? `<div class="spec-row"><span class="spec-label">Category</span><span class="spec-value">${esc(data.category)}</span></div>` : '',
+      data.dimensions  ? `<div class="spec-row"><span class="spec-label">Dimensions</span><span class="spec-value">${esc(data.dimensions)}</span></div>` : '',
+      data.weight      ? `<div class="spec-row"><span class="spec-label">Weight</span><span class="spec-value">${esc(data.weight)}</span></div>` : '',
+      data.specs       ? `<div class="spec-row"><span class="spec-label">Material</span><span class="spec-value">${esc(data.specs)}</span></div>` : '',
+      data.paired_with ? `<div class="spec-row"><span class="spec-label">Paired With</span><span class="spec-value">${esc(data.paired_with)}</span></div>` : '',
+      data.category    ? `<div class="spec-row"><span class="spec-label">Category</span><span class="spec-value">${esc(data.category)}</span></div>` : '',
     ].filter(Boolean).join('');
 
     resultCard.innerHTML = `

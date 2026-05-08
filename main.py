@@ -3,8 +3,8 @@ import base64
 import json
 from pathlib import Path
 
+import anthropic
 from dotenv import load_dotenv
-from openai import OpenAI
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,34 +15,38 @@ load_dotenv(Path(__file__).parent / ".env")
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MAX_FILE_SIZE      = 10 * 1024 * 1024
-GROQ_MODEL         = "meta-llama/llama-4-scout-17b-16e-instruct"
-GROQ_BASE_URL      = "https://api.groq.com/openai/v1"
 PAGES_DIR          = Path(__file__).parent / "static" / "catalog_pages"
-THUMBS_DIR         = Path(__file__).parent / "static" / "catalog_thumbs"
+MODEL              = "claude-haiku-4-5"   # fast + good vision; upgrade to sonnet if needed
 
 app = FastAPI(title="Product Finder")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-def get_client() -> OpenAI:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY not set")
-    return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
+def get_client() -> anthropic.Anthropic:
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
+    return anthropic.Anthropic(api_key=key)
 
 
-def img_block(data: bytes, mime: str) -> dict:
-    b64 = base64.standard_b64encode(data).decode()
-    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+def image_content(data: bytes, media_type: str) -> dict:
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": base64.standard_b64encode(data).decode(),
+        },
+    }
 
 
-def call_vision(client: OpenAI, blocks: list, prompt: str, max_tokens: int = 200) -> str:
-    r = client.chat.completions.create(
-        model=GROQ_MODEL,
+def ask_claude(client: anthropic.Anthropic, blocks: list, max_tokens: int = 200) -> str:
+    resp = client.messages.create(
+        model=MODEL,
         max_tokens=max_tokens,
-        messages=[{"role": "user", "content": blocks + [{"type": "text", "text": prompt}]}],
+        messages=[{"role": "user", "content": blocks}],
     )
-    return r.choices[0].message.content.strip()
+    return resp.content[0].text.strip()
 
 
 def parse_json(raw: str) -> dict:
@@ -53,10 +57,10 @@ def parse_json(raw: str) -> dict:
     return json.loads(raw.strip())
 
 
-def mime_for(filename: str) -> str:
+def media_type_for(filename: str) -> str:
     return {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+        ".png": "image/png",  ".webp": "image/webp", ".gif": "image/gif",
     }.get(Path(filename or "").suffix.lower(), "image/jpeg")
 
 
@@ -92,122 +96,158 @@ async def identify_product(photo: UploadFile = File(...)):
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Image too large (max 10 MB)")
 
+    media_type  = media_type_for(photo.filename or "")
+    photo_block = image_content(content, media_type)
+
+    client = get_client()
+
+    # ── Get all unique categories from the DB ──────────────────────────────
     with db_context() as conn:
-        pages = conn.execute(
-            "SELECT page_number, category, image_filename"
-            " FROM catalog_pages ORDER BY page_number"
+        cat_rows = conn.execute(
+            "SELECT DISTINCT category FROM products ORDER BY category"
+        ).fetchall()
+    categories = [r["category"] for r in cat_rows]
+
+    # ── STEP 1: Classify product category ─────────────────────────────────
+    cat_list = "\n".join(f"- {c}" for c in categories)
+    step1_blocks = [
+        photo_block,
+        {
+            "type": "text",
+            "text": f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+
+Look at this product photo carefully.
+
+Choose the ONE category from the list below that best matches what you see:
+
+{cat_list}
+
+Reply ONLY with valid JSON — no explanation:
+{{"category": "<exact category name from the list above>", "confidence": "high"|"medium"|"low"}}""",
+        },
+    ]
+
+    try:
+        raw1     = ask_claude(client, step1_blocks, max_tokens=80)
+        step1    = parse_json(raw1)
+        category = step1.get("category", "").strip()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Classification error: {e}")
+
+    # Validate category exists
+    if category not in categories:
+        # Fuzzy fallback: pick closest by substring
+        category = next(
+            (c for c in categories if category.lower() in c.lower()
+             or c.lower() in category.lower()),
+            categories[0],
+        )
+
+    # ── STEP 2: Find exact product from category ───────────────────────────
+    with db_context() as conn:
+        product_rows = conn.execute(
+            "SELECT * FROM products WHERE category = ? ORDER BY code",
+            (category,),
         ).fetchall()
 
-    if not pages:
-        return JSONResponse(content={"matched": False, "message": "Catalog not loaded."})
-
-    mime         = mime_for(photo.filename or "")
-    worker_block = img_block(content, mime)
-
-    try:
-        client = get_client()
-    except HTTPException:
-        raise
-
-    # ── STEP 1: Visual scan — worker photo + ALL 50 thumbnails ─────────────
-    # Build image blocks: worker photo first, then all 50 thumbnails in order
-    step1_blocks = [worker_block]
-
-    page_list_text = []
-    for p in pages:
-        thumb_path = THUMBS_DIR / p["image_filename"]
-        if thumb_path.exists():
-            step1_blocks.append(img_block(thumb_path.read_bytes(), "image/jpeg"))
-            page_list_text.append(
-                f"Thumbnail {p['page_number']}: {p['category']}"
-            )
-
-    step1_prompt = f"""You are a product identification assistant for a Maxweld ironwork warehouse catalog.
-
-The FIRST image is a photo taken by a warehouse worker of a product they want to identify.
-The REMAINING images are thumbnails of catalog pages 1–50, in order.
-
-Here is what each thumbnail page covers:
-{chr(10).join(page_list_text)}
-
-Study the worker's photo carefully. Look at the shape, style, silhouette, and type of the item.
-Then scan the catalog thumbnails to find which page visually contains that same type of product.
-
-Return ONLY valid JSON — no markdown, no explanation:
-{{"pages": [<top 3 page numbers most likely to contain this product, best first>], "confidence": "high"|"medium"|"low"}}"""
-
-    try:
-        raw1   = call_vision(client, step1_blocks, step1_prompt, max_tokens=80)
-        step1  = parse_json(raw1)
-        candidates = step1.get("pages", [])[:3]   # up to 3 candidate pages
-        confidence = step1.get("confidence", "medium")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Step 1 error: {e}")
-
-    if not candidates:
-        return JSONResponse(content={"matched": False,
-            "message": "Could not identify a matching catalog page."})
-
-    # ── STEP 2: Read full-res page → identify exact product ────────────────
-    # Try candidates in order; stop at the first confident match
-    best_result = None
-
-    for page_num in candidates:
-        matched_page = next((p for p in pages if p["page_number"] == page_num), None)
-        if not matched_page:
-            continue
-
-        full_img_path = PAGES_DIR / matched_page["image_filename"]
-        if not full_img_path.exists():
-            continue
-
-        catalog_block = img_block(full_img_path.read_bytes(), "image/jpeg")
-
-        step2_prompt = f"""You have two images:
-  IMAGE 1 — A warehouse worker's photo of a product to identify.
-  IMAGE 2 — Page {page_num} of the Maxweld catalog ({matched_page['category']}).
-
-Carefully compare the product in IMAGE 1 against every item shown on the catalog page in IMAGE 2.
-Look for matching shape, silhouette, scroll style, proportions, and design details.
-
-If you find a match, return ONLY valid JSON:
-{{
-  "matched": true,
-  "product_code": "<exact bold code from the page, e.g. 6182 or 5413A or DR11>",
-  "product_name": "<code + brief description, e.g. '6182 Forged Flower Panel'>",
-  "dimensions":   "<size exactly as printed>",
-  "weight":       "<weight exactly as printed, e.g. 21.5 Lbs>",
-  "specs":        "<rod/material size as printed, e.g. 5/16\\"x5/8\\" or Sq.1/2\\">",
-  "confidence":   "high"|"medium"|"low",
-  "reason":       "<one sentence: specific visual features that matched>"
-}}
-
-If no product on this page matches the photo, return:
-{{"matched": false}}"""
-
-        try:
-            raw2   = call_vision(client, [worker_block, catalog_block], step2_prompt, max_tokens=300)
-            result = parse_json(raw2)
-        except Exception:
-            continue   # try next candidate page
-
-        if result.get("matched"):
-            result["page_number"] = page_num
-            result["category"]    = matched_page["category"]
-            result["image_url"]   = f"/static/catalog_pages/{matched_page['image_filename']}"
-            best_result = result
-            break   # found a confident match
-
-    # If no step 2 match, fall back to showing the top candidate page
-    if not best_result:
-        fb_num  = candidates[0]
-        fb_page = next((p for p in pages if p["page_number"] == fb_num), None)
+    if not product_rows:
         return JSONResponse(content={
-            "matched":      False,
-            "page_number":  fb_num,
-            "category":     fb_page["category"] if fb_page else "",
-            "image_url":    f"/static/catalog_pages/{fb_page['image_filename']}" if fb_page else "",
-            "reason":       "Product type found in catalog but could not pin exact item — check the page below.",
+            "matched": False,
+            "message": f"No products found for category '{category}'.",
         })
 
-    return best_result
+    # Format product list as compact text for Claude context (RAG)
+    product_lines = []
+    for p in product_rows:
+        parts = [f"Code: {p['code']}"]
+        if p["dimensions"]:  parts.append(f"Size: {p['dimensions']}")
+        if p["weight"]:      parts.append(f"Weight: {p['weight']}")
+        if p["bar_profile"]: parts.append(f"Bar: {p['bar_profile']}")
+        if p["paired_with"]: parts.append(f"Pair: {p['paired_with']}")
+        product_lines.append(" | ".join(parts))
+
+    product_catalog = "\n".join(product_lines)
+
+    step2_blocks = [
+        photo_block,
+        {
+            "type": "text",
+            "text": f"""You are a product identification assistant for a Maxweld ironwork warehouse.
+
+Look at the product in the photo carefully.
+
+Category: {category}
+
+Here are all products in this category from the catalog:
+{product_catalog}
+
+Match the product in the photo to the BEST entry in the list above.
+Consider shape, size, and style. The code is the bold identifier printed on the catalog page.
+
+Reply ONLY with valid JSON — no explanation:
+{{
+  "matched": true,
+  "product_code": "<exact code from list>",
+  "confidence": "high"|"medium"|"low",
+  "reason": "<one sentence: specific visual features that matched>"
+}}
+
+If nothing matches at all:
+{{"matched": false, "reason": "<why>"}}""",
+        },
+    ]
+
+    try:
+        raw2   = ask_claude(client, step2_blocks, max_tokens=200)
+        result = parse_json(raw2)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Identification error: {e}")
+
+    if not result.get("matched"):
+        return JSONResponse(content={
+            "matched":  False,
+            "category": category,
+            "reason":   result.get("reason", "No matching product found."),
+        })
+
+    # ── Look up full product details ───────────────────────────────────────
+    matched_code = result.get("product_code", "").strip()
+    with db_context() as conn:
+        product = conn.execute(
+            "SELECT * FROM products WHERE code = ? AND category = ?",
+            (matched_code, category),
+        ).fetchone()
+
+        # Fallback: search by code only (category might differ slightly)
+        if not product:
+            product = conn.execute(
+                "SELECT * FROM products WHERE code = ?",
+                (matched_code,),
+            ).fetchone()
+
+    if not product:
+        return JSONResponse(content={
+            "matched":  False,
+            "category": category,
+            "reason":   f"Code {matched_code} not found in database.",
+        })
+
+    # ── Build catalog page image URL ───────────────────────────────────────
+    pg_num    = product["source_page"]
+    image_url = f"/static/catalog_pages/page_{pg_num:02d}.jpg" if pg_num else None
+
+    return {
+        "matched":      True,
+        "product_code": product["code"],
+        "product_name": f"{product['code']} — {product['category']}",
+        "category":     product["category"],
+        "dimensions":   product["dimensions"],
+        "weight":       product["weight"],
+        "specs":        product["bar_profile"],
+        "paired_with":  product["paired_with"],
+        "description":  product["description"],
+        "page_number":  pg_num,
+        "image_url":    image_url,
+        "confidence":   result.get("confidence", "medium"),
+        "reason":       result.get("reason", ""),
+    }

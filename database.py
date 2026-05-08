@@ -38,13 +38,37 @@ def init_db():
                 product_codes   TEXT,
                 created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS products (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                code        TEXT    NOT NULL,
+                category    TEXT    NOT NULL,
+                dimensions  TEXT,
+                weight      TEXT,
+                bar_profile TEXT,
+                paired_with TEXT,
+                description TEXT,
+                source_page INTEGER,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_products_category
+                ON products(category);
+            CREATE INDEX IF NOT EXISTS idx_products_code
+                ON products(code);
         """)
 
-    # Auto-seed from seed_data.json if DB is empty and seed file exists
+    # Seed from seed_data.json if DB is empty
     with db_context() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM catalog_pages").fetchone()[0]
-        if count == 0 and SEED_FILE.exists():
-            data = json.loads(SEED_FILE.read_text())
+        page_count    = conn.execute("SELECT COUNT(*) FROM catalog_pages").fetchone()[0]
+        product_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+
+        if not SEED_FILE.exists():
+            return
+
+        data = json.loads(SEED_FILE.read_text())
+
+        if page_count == 0:
             for p in data.get("pages", []):
                 conn.execute(
                     "INSERT OR IGNORE INTO catalog_pages"
@@ -53,4 +77,18 @@ def init_db():
                     (p["page_number"], p["category"],
                      p["image_filename"], p["product_codes"]),
                 )
-            print(f"[DB] Seeded {len(data['pages'])} catalog pages from seed_data.json")
+            print(f"[DB] Seeded {len(data.get('pages', []))} catalog pages")
+
+        if product_count == 0:
+            for p in data.get("products", []):
+                conn.execute(
+                    "INSERT INTO products"
+                    " (code, category, dimensions, weight, bar_profile,"
+                    "  paired_with, description, source_page)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (p["code"], p["category"], p.get("dimensions"),
+                     p.get("weight"), p.get("bar_profile"),
+                     p.get("paired_with"), p.get("description"),
+                     p.get("source_page")),
+                )
+            print(f"[DB] Seeded {len(data.get('products', []))} products")
